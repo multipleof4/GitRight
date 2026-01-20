@@ -118,9 +118,9 @@
 
         handlePressStart(e, item, type) {
             this.pressTimer = setTimeout(() => {
-                if ('vibrate' in navigator) navigator.vibrate(50);
+                if ('vibrate' in navigator) navigator.vibrate(40);
                 this.showContextMenu(e, item, type);
-            }, 500);
+            }, 400);
         },
 
         handlePressEnd() {
@@ -145,7 +145,8 @@
             if (newName && newName !== oldName) {
                 const newPath = oldPath.substring(0, oldPath.lastIndexOf(oldName)) + newName;
                 const originalItem = this.fileTree.find(i => i.path === oldPath);
-                this.trackChange('rename', newPath, oldPath, originalItem.sha);
+                
+                this.trackChange('rename', newPath, oldPath, originalItem.sha, originalItem.type);
                 
                 this.fileTree = this.fileTree.map(item => {
                     if (item.path === oldPath) return { ...item, path: newPath };
@@ -161,7 +162,7 @@
         deleteItem() {
             if (confirm('Are you sure, Meowster?')) {
                 const target = this.contextMenu.target;
-                this.trackChange('delete', target.path, null, target.sha);
+                this.trackChange('delete', target.path, null, target.sha, target.type);
                 this.fileTree = this.fileTree.filter(item => 
                     item.path !== target.path && !item.path.startsWith(target.path + '/')
                 );
@@ -186,7 +187,7 @@
 
             if (this.clipboard.action === 'cut') {
                 const oldPath = this.clipboard.item.path;
-                this.trackChange('move', newPath, oldPath, this.clipboard.item.sha);
+                this.trackChange('move', newPath, oldPath, this.clipboard.item.sha, this.clipboard.item.type);
                 this.fileTree = this.fileTree.map(item => {
                     if (item.path === oldPath) return { ...item, path: newPath };
                     if (item.path.startsWith(oldPath + '/')) {
@@ -197,7 +198,7 @@
                 this.clipboard = { item: null, action: null };
             } else {
                 this.fileTree.push({ ...this.clipboard.item, path: newPath });
-                this.trackChange('add', newPath, null, this.clipboard.item.sha);
+                this.trackChange('add', newPath, null, this.clipboard.item.sha, this.clipboard.item.type);
             }
             this.contextMenu.show = false;
         },
@@ -206,14 +207,15 @@
             const name = prompt('Folder name:', 'new-folder');
             if (name) {
                 const newPath = this.currentPath ? `${this.currentPath}/${name}` : name;
+                const keepPath = `${newPath}/.gitkeep`;
                 this.fileTree.push({ path: newPath, type: 'tree', sha: null });
-                this.trackChange('add', newPath);
+                this.trackChange('add', keepPath, null, null, 'blob');
             }
             this.contextMenu.show = false;
         },
 
-        trackChange(type, path, oldPath = null, sha = null) {
-            this.pendingChanges.push({ type, path, oldPath, sha, id: Date.now() });
+        trackChange(type, path, oldPath = null, sha = null, itemType = 'blob') {
+            this.pendingChanges.push({ type, path, oldPath, sha, itemType, id: Date.now() });
         },
 
         async pushChanges() {
@@ -221,48 +223,40 @@
             this.isPushing = true;
             try {
                 const branch = this.currentRepo.split('@')[1] || 'main';
-                
-                // 1. Get latest commit SHA
                 const refData = await this.apiRequest(`/git/refs/heads/${branch}`);
                 const lastCommitSha = refData.object.sha;
-                
-                // 2. Get the tree SHA of that commit
                 const lastCommitData = await this.apiRequest(`/git/commits/${lastCommitSha}`);
                 const baseTreeSha = lastCommitData.tree.sha;
 
-                // 3. Construct the new tree
-                const treePayload = this.pendingChanges.map(change => {
-                    if (change.type === 'delete') return { path: change.path, mode: '100644', type: 'blob', sha: null };
-                    if (change.type === 'rename' || change.type === 'move') {
-                        // In Git Data API, move is a delete + an add with existing SHA
-                        return [
-                            { path: change.oldPath, mode: '100644', type: 'blob', sha: null },
-                            { path: change.path, mode: '100644', type: 'blob', sha: change.sha }
-                        ];
+                const treePayload = [];
+                this.pendingChanges.forEach(change => {
+                    const mode = change.itemType === 'tree' ? '040000' : '100644';
+                    
+                    if (change.type === 'delete') {
+                        treePayload.push({ path: change.path, mode, type: change.itemType, sha: null });
+                    } else if (change.type === 'rename' || change.type === 'move') {
+                        treePayload.push({ path: change.oldPath, mode, type: change.itemType, sha: null });
+                        treePayload.push({ path: change.path, mode, type: change.itemType, sha: change.sha });
+                    } else if (change.type === 'add') {
+                        if (change.sha) {
+                            treePayload.push({ path: change.path, mode, type: change.itemType, sha: change.sha });
+                        } else {
+                            treePayload.push({ path: change.path, mode, type: change.itemType, content: '\n' });
+                        }
                     }
-                    // Add
-                    return { 
-                        path: change.path, 
-                        mode: change.sha ? '100644' : '100644', 
-                        type: 'blob', 
-                        sha: change.sha || null,
-                        content: change.sha ? undefined : '\n' // Empty file if new
-                    };
-                }).flat();
+                });
 
                 const newTree = await this.apiRequest('/git/trees', 'POST', {
                     base_tree: baseTreeSha,
                     tree: treePayload
                 });
 
-                // 4. Create commit
                 const newCommit = await this.apiRequest('/git/commits', 'POST', {
                     message: this.commitMessage,
                     tree: newTree.sha,
                     parents: [lastCommitSha]
                 });
 
-                // 5. Update reference (Push)
                 await this.apiRequest(`/git/refs/heads/${branch}`, 'PATCH', {
                     sha: newCommit.sha,
                     force: false
