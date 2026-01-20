@@ -222,9 +222,11 @@
             const name = prompt('Folder name:', 'new-folder');
             if (name) {
                 const newPath = this.currentPath ? `${this.currentPath}/${name}` : name;
-                const keepPath = `${newPath}/.gitkeep`;
+                if (this.fileTree.some(i => i.path === newPath)) {
+                    alert('Folder already exists, Meowster.');
+                    return;
+                }
                 this.fileTree.push({ path: newPath, type: 'tree', sha: null });
-                this.trackChange('add', keepPath, null, null, 'blob');
             }
             this.contextMenu.show = false;
         },
