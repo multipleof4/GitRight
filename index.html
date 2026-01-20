@@ -13,8 +13,7 @@
         .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
         .truncate-2-lines { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-        /* Prevent text selection during long press */
-        .select-none { -webkit-user-select: none; user-select: none; }
+        .select-none { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
     </style>
 </head>
 <body class="bg-white antialiased text-slate-900 overflow-hidden select-none">
@@ -31,11 +30,11 @@
         fileTree: [],
         currentPath: '',
         isLoading: false,
+        isPushing: false,
 
-        // Context Menu State
         contextMenu: { show: false, x: 0, y: 0, target: null, type: 'deadspace' },
         pressTimer: null,
-        clipboard: { item: null, action: null }, // action: 'copy' | 'cut'
+        clipboard: { item: null, action: null },
         pendingChanges: [],
         commitMessage: '',
 
@@ -50,6 +49,22 @@
             this.$nextTick(() => lucide.createIcons());
         },
 
+        async apiRequest(endpoint, method = 'GET', body = null) {
+            const [fullRepo] = this.currentRepo.split('@');
+            const url = `https://api.github.com/repos/${fullRepo}${endpoint}`;
+            const headers = {
+                'Accept': 'application/vnd.github.v3+json',
+                'Authorization': `token ${this.githubPat}`,
+                'Content-Type': 'application/json'
+            };
+            const response = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : null });
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.message || 'API Error');
+            }
+            return response.json();
+        },
+
         async selectRepo(repoStr) {
             this.currentRepo = repoStr;
             this.currentPath = '';
@@ -59,18 +74,12 @@
             
             const [fullRepo, branchPart] = repoStr.split('@');
             const branch = branchPart || 'main';
-            const url = `https://api.github.com/repos/${fullRepo}/git/trees/${branch}?recursive=1`;
             
             try {
-                const headers = { 'Accept': 'application/vnd.github.v3+json' };
-                if (this.githubPat) headers['Authorization'] = `token ${this.githubPat}`;
-                
-                const response = await fetch(url, { headers });
-                if (!response.ok) throw new Error('Failed to fetch');
-                const data = await response.json();
+                const data = await this.apiRequest(`/git/trees/${branch}?recursive=1`);
                 this.fileTree = data.tree || [];
             } catch (e) {
-                alert('Error fetching repository, Meowster.');
+                alert('Error fetching repository, Meowster: ' + e.message);
                 this.currentRepo = null;
             } finally {
                 this.isLoading = false;
@@ -82,29 +91,22 @@
             if (!this.fileTree.length) return [];
             return this.fileTree.filter(item => {
                 const parts = item.path.split('/');
-                if (this.currentPath === '') {
-                    return parts.length === 1;
-                }
-                const parentPath = parts.slice(0, -1).join('/');
-                return parentPath === this.currentPath;
+                if (this.currentPath === '') return parts.length === 1;
+                return parts.slice(0, -1).join('/') === this.currentPath;
             }).sort((a, b) => (b.type === 'tree') - (a.type === 'tree') || a.path.localeCompare(b.path));
         },
 
         get breadcrumbs() {
-            if (!this.currentPath) return [];
-            return this.currentPath.split('/');
+            return this.currentPath ? this.currentPath.split('/') : [];
         },
 
         get repoDisplayName() {
-            if (!this.currentRepo) return '';
-            return this.currentRepo.split('@')[0].split('/').pop();
+            return this.currentRepo ? this.currentRepo.split('@')[0].split('/').pop() : '';
         },
 
         navigateTo(path) {
             const item = this.fileTree.find(i => i.path === path);
-            if (item && item.type === 'tree') {
-                this.currentPath = path;
-            }
+            if (item && item.type === 'tree') this.currentPath = path;
         },
 
         goUp() {
@@ -114,11 +116,11 @@
             this.currentPath = parts.join('/');
         },
 
-        // Long Press Logic
         handlePressStart(e, item, type) {
             this.pressTimer = setTimeout(() => {
+                if ('vibrate' in navigator) navigator.vibrate(50);
                 this.showContextMenu(e, item, type);
-            }, 600);
+            }, 500);
         },
 
         handlePressEnd() {
@@ -136,13 +138,15 @@
             };
         },
 
-        // File Operations
         renameItem() {
             const oldPath = this.contextMenu.target.path;
             const oldName = oldPath.split('/').pop();
             const newName = prompt('Rename to:', oldName);
             if (newName && newName !== oldName) {
-                const newPath = oldPath.replace(oldName, newName);
+                const newPath = oldPath.substring(0, oldPath.lastIndexOf(oldName)) + newName;
+                const originalItem = this.fileTree.find(i => i.path === oldPath);
+                this.trackChange('rename', newPath, oldPath, originalItem.sha);
+                
                 this.fileTree = this.fileTree.map(item => {
                     if (item.path === oldPath) return { ...item, path: newPath };
                     if (item.path.startsWith(oldPath + '/')) {
@@ -150,18 +154,17 @@
                     }
                     return item;
                 });
-                this.trackChange('rename', newPath, oldPath);
             }
             this.contextMenu.show = false;
         },
 
         deleteItem() {
-            if (confirm('Are you sure you want to delete this, Meowster?')) {
-                const targetPath = this.contextMenu.target.path;
+            if (confirm('Are you sure, Meowster?')) {
+                const target = this.contextMenu.target;
+                this.trackChange('delete', target.path, null, target.sha);
                 this.fileTree = this.fileTree.filter(item => 
-                    item.path !== targetPath && !item.path.startsWith(targetPath + '/')
+                    item.path !== target.path && !item.path.startsWith(target.path + '/')
                 );
-                this.trackChange('delete', targetPath);
             }
             this.contextMenu.show = false;
         },
@@ -179,14 +182,11 @@
             const name = this.clipboard.item.path.split('/').pop();
             const newPath = this.currentPath ? `${this.currentPath}/${name}` : name;
             
-            // Check for collisions
-            if (this.fileTree.some(i => i.path === newPath)) {
-                alert('An item with this name already exists here.');
-                return;
-            }
+            if (this.fileTree.some(i => i.path === newPath)) return alert('Collision detected.');
 
             if (this.clipboard.action === 'cut') {
                 const oldPath = this.clipboard.item.path;
+                this.trackChange('move', newPath, oldPath, this.clipboard.item.sha);
                 this.fileTree = this.fileTree.map(item => {
                     if (item.path === oldPath) return { ...item, path: newPath };
                     if (item.path.startsWith(oldPath + '/')) {
@@ -194,12 +194,10 @@
                     }
                     return item;
                 });
-                this.trackChange('move', newPath, oldPath);
                 this.clipboard = { item: null, action: null };
             } else {
-                const newItem = { ...this.clipboard.item, path: newPath };
-                this.fileTree.push(newItem);
-                this.trackChange('add', newPath);
+                this.fileTree.push({ ...this.clipboard.item, path: newPath });
+                this.trackChange('add', newPath, null, this.clipboard.item.sha);
             }
             this.contextMenu.show = false;
         },
@@ -208,23 +206,78 @@
             const name = prompt('Folder name:', 'new-folder');
             if (name) {
                 const newPath = this.currentPath ? `${this.currentPath}/${name}` : name;
-                this.fileTree.push({ path: newPath, type: 'tree', sha: 'local' });
+                this.fileTree.push({ path: newPath, type: 'tree', sha: null });
                 this.trackChange('add', newPath);
             }
             this.contextMenu.show = false;
         },
 
-        trackChange(type, path, oldPath = null) {
-            this.pendingChanges.push({ type, path, oldPath, id: Date.now() });
-            this.refreshIcons();
+        trackChange(type, path, oldPath = null, sha = null) {
+            this.pendingChanges.push({ type, path, oldPath, sha, id: Date.now() });
         },
 
-        commitChanges() {
-            if (!this.commitMessage) return alert('Please enter a commit message, Meowster.');
-            alert(`Committed ${this.pendingChanges.length} changes: ${this.commitMessage}`);
-            this.pendingChanges = [];
-            this.commitMessage = '';
-            this.commitModal = false;
+        async pushChanges() {
+            if (!this.commitMessage) return alert('Enter a message, Meowster.');
+            this.isPushing = true;
+            try {
+                const branch = this.currentRepo.split('@')[1] || 'main';
+                
+                // 1. Get latest commit SHA
+                const refData = await this.apiRequest(`/git/refs/heads/${branch}`);
+                const lastCommitSha = refData.object.sha;
+                
+                // 2. Get the tree SHA of that commit
+                const lastCommitData = await this.apiRequest(`/git/commits/${lastCommitSha}`);
+                const baseTreeSha = lastCommitData.tree.sha;
+
+                // 3. Construct the new tree
+                const treePayload = this.pendingChanges.map(change => {
+                    if (change.type === 'delete') return { path: change.path, mode: '100644', type: 'blob', sha: null };
+                    if (change.type === 'rename' || change.type === 'move') {
+                        // In Git Data API, move is a delete + an add with existing SHA
+                        return [
+                            { path: change.oldPath, mode: '100644', type: 'blob', sha: null },
+                            { path: change.path, mode: '100644', type: 'blob', sha: change.sha }
+                        ];
+                    }
+                    // Add
+                    return { 
+                        path: change.path, 
+                        mode: change.sha ? '100644' : '100644', 
+                        type: 'blob', 
+                        sha: change.sha || null,
+                        content: change.sha ? undefined : '\n' // Empty file if new
+                    };
+                }).flat();
+
+                const newTree = await this.apiRequest('/git/trees', 'POST', {
+                    base_tree: baseTreeSha,
+                    tree: treePayload
+                });
+
+                // 4. Create commit
+                const newCommit = await this.apiRequest('/git/commits', 'POST', {
+                    message: this.commitMessage,
+                    tree: newTree.sha,
+                    parents: [lastCommitSha]
+                });
+
+                // 5. Update reference (Push)
+                await this.apiRequest(`/git/refs/heads/${branch}`, 'PATCH', {
+                    sha: newCommit.sha,
+                    force: false
+                });
+
+                alert('Successfully pushed to GitHub, Meowster!');
+                this.pendingChanges = [];
+                this.commitMessage = '';
+                this.commitModal = false;
+                await this.selectRepo(this.currentRepo);
+            } catch (e) {
+                alert('Push failed: ' + e.message);
+            } finally {
+                this.isPushing = false;
+            }
         },
 
         addRepo() {
@@ -232,7 +285,6 @@
             if (repo && repo.includes('/')) {
                 this.repos.push(repo);
                 this.saveRepos();
-                this.refreshIcons();
             }
         },
         
@@ -275,7 +327,6 @@
             @mousedown="handlePressStart($event, null, 'deadspace')"
             @mouseup="handlePressEnd()"
         >
-            <!-- Explorer Toolbar -->
             <template x-if="currentRepo">
                 <div class="flex items-center px-4 py-2 bg-white border-b border-gray-100 space-x-2 shrink-0 z-10">
                     <button @click="goUp()" :disabled="!currentPath" class="p-1 hover:bg-gray-100 rounded disabled:opacity-30">
@@ -286,18 +337,13 @@
                         <template x-for="(part, index) in breadcrumbs" :key="index">
                             <div class="flex items-center">
                                 <i data-lucide="chevron-right" class="w-3 h-3 mx-1 text-slate-400"></i>
-                                <button 
-                                    @click="navigateTo(breadcrumbs.slice(0, index + 1).join('/'))" 
-                                    class="text-xs text-blue-600 hover:underline whitespace-nowrap" 
-                                    x-text="part">
-                                </button>
+                                <button @click="navigateTo(breadcrumbs.slice(0, index + 1).join('/'))" class="text-xs text-blue-600 hover:underline whitespace-nowrap" x-text="part"></button>
                             </div>
                         </template>
                     </div>
                 </div>
             </template>
 
-            <!-- File Grid -->
             <div class="flex-1 overflow-y-auto p-4 custom-scrollbar">
                 <template x-if="!currentRepo">
                     <div class="h-full flex flex-col items-center justify-center text-center space-y-4">
@@ -345,10 +391,7 @@
         <!-- Context Menu -->
         <div x-show="contextMenu.show" x-cloak class="fixed inset-0 z-[100]">
             <div @click="contextMenu.show = false" class="absolute inset-0"></div>
-            <div 
-                class="absolute bg-white rounded-xl shadow-2xl border border-slate-200 py-1 w-40 overflow-hidden"
-                :style="`top: ${contextMenu.y}px; left: ${contextMenu.x}px;`"
-            >
+            <div class="absolute bg-white rounded-xl shadow-2xl border border-slate-200 py-1 w-40 overflow-hidden" :style="`top: ${contextMenu.y}px; left: ${contextMenu.x}px;`">
                 <template x-if="contextMenu.type === 'item'">
                     <div class="flex flex-col">
                         <button @click="renameItem()" class="flex items-center space-x-2 px-3 py-2 hover:bg-slate-50 text-slate-700">
@@ -387,40 +430,41 @@
 
         <!-- Commit Modal -->
         <div x-show="commitModal" x-cloak class="fixed inset-0 z-[70] flex items-center justify-center p-4">
-            <div @click="commitModal = false" class="fixed inset-0 bg-black/40 backdrop-blur-sm"></div>
+            <div @click="!isPushing && (commitModal = false)" class="fixed inset-0 bg-black/40 backdrop-blur-sm"></div>
             <div class="relative bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden flex flex-col max-h-[80vh]">
                 <div class="p-6 space-y-4 flex-1 overflow-y-auto custom-scrollbar">
                     <div class="flex items-center justify-between">
-                        <h3 class="text-xl font-semibold text-slate-900">Pending Changes</h3>
+                        <h3 class="text-xl font-semibold text-slate-900">Push Changes</h3>
                         <span class="bg-orange-100 text-orange-600 text-[10px] font-bold px-2 py-0.5 rounded-full" x-text="`${pendingChanges.length} items`"></span>
                     </div>
-                    
                     <div class="space-y-2">
                         <template x-for="change in pendingChanges" :key="change.id">
                             <div class="flex items-center justify-between p-2 bg-slate-50 rounded-lg border border-slate-100">
                                 <div class="flex items-center space-x-2 truncate">
-                                    <span :class="{
-                                        'text-green-600': change.type === 'add',
-                                        'text-red-600': change.type === 'delete',
-                                        'text-blue-600': change.type === 'rename' || change.type === 'move'
-                                    }" class="text-[10px] font-bold uppercase" x-text="change.type"></span>
+                                    <span :class="{'text-green-600': change.type === 'add', 'text-red-600': change.type === 'delete', 'text-blue-600': change.type !== 'add' && change.type !== 'delete'}" class="text-[10px] font-bold uppercase" x-text="change.type"></span>
                                     <span class="text-xs text-slate-600 truncate" x-text="change.path"></span>
                                 </div>
                             </div>
                         </template>
                     </div>
-
                     <div class="space-y-2">
                         <label class="block text-xs font-bold uppercase tracking-wider text-slate-400 ml-1">Commit Message</label>
                         <textarea x-model="commitMessage" placeholder="What did you change, Meowster?" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all resize-none h-24 text-sm"></textarea>
                     </div>
                 </div>
                 <div class="p-6 bg-slate-50 border-t border-slate-100 flex flex-col space-y-3">
-                    <button @click="commitChanges()" class="w-full py-3 bg-slate-900 text-white font-medium rounded-xl hover:bg-slate-800 transition-colors flex items-center justify-center space-x-2">
-                        <i data-lucide="check" class="w-4 h-4"></i>
-                        <span>Commit to Branch</span>
+                    <button @click="pushChanges()" :disabled="isPushing" class="w-full py-3 bg-slate-900 text-white font-medium rounded-xl hover:bg-slate-800 transition-colors flex items-center justify-center space-x-2 disabled:opacity-50">
+                        <template x-if="!isPushing">
+                            <div class="flex items-center space-x-2">
+                                <i data-lucide="upload-cloud" class="w-4 h-4"></i>
+                                <span>Commit & Push</span>
+                            </div>
+                        </template>
+                        <template x-if="isPushing">
+                            <div class="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                        </template>
                     </button>
-                    <button @click="commitModal = false" class="w-full py-2 text-slate-500 text-sm font-medium hover:text-slate-700 transition-colors text-center">Discard</button>
+                    <button @click="commitModal = false" :disabled="isPushing" class="w-full py-2 text-slate-500 text-sm font-medium hover:text-slate-700 transition-colors text-center">Cancel</button>
                 </div>
             </div>
         </div>
@@ -431,29 +475,16 @@
             <div class="relative w-72 bg-white h-full shadow-xl flex flex-col border-r border-slate-100">
                 <div class="p-4 border-b border-slate-50 flex items-center justify-between">
                     <h2 class="text-sm font-bold text-slate-800">Explorer</h2>
-                    <button @click="leftSidebar = false" class="p-1 hover:bg-slate-50 rounded">
-                        <i data-lucide="x" class="w-4 h-4 text-slate-400"></i>
-                    </button>
+                    <button @click="leftSidebar = false" class="p-1 hover:bg-slate-50 rounded"><i data-lucide="x" class="w-4 h-4 text-slate-400"></i></button>
                 </div>
                 <div class="flex-1 overflow-y-auto p-2 custom-scrollbar">
-                    <template x-if="!currentRepo">
-                        <p class="text-[10px] text-slate-400 italic p-4">Select a repository to view its tree structure.</p>
-                    </template>
                     <template x-if="currentRepo">
                         <div class="space-y-0.5">
                             <template x-for="item in fileTree" :key="item.path">
-                                <button 
-                                    @click="navigateTo(item.path); if(item.type==='blob') leftSidebar=false"
-                                    class="w-full flex items-center px-2 py-1 rounded hover:bg-slate-50 text-left group"
-                                    :class="currentPath === item.path ? 'bg-blue-50 text-blue-700' : 'text-slate-600'"
-                                >
+                                <button @click="navigateTo(item.path); if(item.type==='blob') leftSidebar=false" class="w-full flex items-center px-2 py-1 rounded hover:bg-slate-50 text-left group" :class="currentPath === item.path ? 'bg-blue-50 text-blue-700' : 'text-slate-600'">
                                     <div :style="`margin-left: ${(item.path.split('/').length - 1) * 12}px`" class="flex items-center">
-                                        <template x-if="item.type === 'tree'">
-                                            <i data-lucide="chevron-right" class="w-3 h-3 mr-1 text-slate-300" :class="currentPath.startsWith(item.path) ? 'rotate-90' : ''"></i>
-                                        </template>
-                                        <template x-if="item.type === 'blob'">
-                                            <span class="w-3 h-3 mr-1"></span>
-                                        </template>
+                                        <template x-if="item.type === 'tree'"><i data-lucide="chevron-right" class="w-3 h-3 mr-1 text-slate-300" :class="currentPath.startsWith(item.path) ? 'rotate-90' : ''"></i></template>
+                                        <template x-if="item.type === 'blob'"><span class="w-3 h-3 mr-1"></span></template>
                                         <i :data-lucide="item.type === 'tree' ? 'folder' : 'file'" class="w-3.5 h-3.5 mr-2 opacity-70"></i>
                                         <span class="text-[11px] truncate" x-text="item.path.split('/').pop()"></span>
                                     </div>
@@ -473,33 +504,21 @@
                     <i data-lucide="plus-circle" class="w-4 h-4"></i>
                     <span class="text-sm font-semibold">New Repo</span>
                 </button>
-
-                <div class="flex-1 flex flex-col min-h-0">
-                    <h2 class="text-xs font-bold mb-4 text-slate-400 uppercase tracking-widest flex items-center">
-                        <i data-lucide="github" class="w-3 h-3 mr-2"></i>
-                        Repositories
-                    </h2>
-                    <div class="flex-1 overflow-y-auto pr-2 space-y-2 custom-scrollbar">
-                        <template x-for="(repo, index) in repos" :key="index">
-                            <div class="group flex items-center justify-between p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors cursor-pointer" @click="selectRepo(repo)">
-                                <div class="flex items-center space-x-3 truncate">
-                                    <i data-lucide="git-fork" class="w-3.5 h-3.5 text-slate-400"></i>
-                                    <span class="text-xs font-medium text-slate-600 truncate" x-text="repo"></span>
-                                </div>
-                                <button @click.stop="removeRepo(index)" class="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-500 transition-all">
-                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
-                                </button>
+                <div class="flex-1 overflow-y-auto pr-2 space-y-2 custom-scrollbar">
+                    <template x-for="(repo, index) in repos" :key="index">
+                        <div class="group flex items-center justify-between p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors cursor-pointer" @click="selectRepo(repo)">
+                            <div class="flex items-center space-x-3 truncate">
+                                <i data-lucide="git-fork" class="w-3.5 h-3.5 text-slate-400"></i>
+                                <span class="text-xs font-medium text-slate-600 truncate" x-text="repo"></span>
                             </div>
-                        </template>
-                    </div>
+                            <button @click.stop="removeRepo(index)" class="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-500 transition-all"><i data-lucide="trash-2" class="w-3.5 h-3.5"></i></button>
+                        </div>
+                    </template>
                 </div>
-                
                 <div class="pt-4 mt-4 border-t border-slate-100">
                     <button @click="accountModal = true; rightSidebar = false" class="flex items-center justify-between w-full p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors group">
                         <div class="flex items-center space-x-3">
-                            <div class="bg-slate-900 rounded-full p-1.5">
-                                <i data-lucide="user" class="w-3.5 h-3.5 text-blue-400 fill-blue-400"></i>
-                            </div>
+                            <div class="bg-slate-900 rounded-full p-1.5"><i data-lucide="user" class="w-3.5 h-3.5 text-blue-400 fill-blue-400"></i></div>
                             <span class="text-xs font-medium text-slate-700">Account</span>
                         </div>
                         <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-400 group-hover:text-slate-600"></i>
@@ -511,28 +530,22 @@
         <!-- Account Modal -->
         <div x-show="accountModal" x-cloak class="fixed inset-0 z-[70] flex items-center justify-center p-4">
             <div @click="accountModal = false" class="fixed inset-0 bg-black/40 backdrop-blur-sm"></div>
-            <div class="relative bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden">
-                <div class="p-6 space-y-6">
-                    <div class="space-y-2">
-                        <h3 class="text-xl font-semibold text-slate-900">GitHub Settings</h3>
-                        <p class="text-sm text-slate-500">Provide your Personal Access Token to enable repository access.</p>
-                    </div>
-                    <div class="space-y-2">
-                        <label for="pat" class="block text-xs font-bold uppercase tracking-wider text-slate-400 ml-1">Personal Access Token</label>
-                        <input id="pat" type="password" x-model="githubPat" placeholder="ghp_xxxxxxxxxxxx" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all">
-                    </div>
-                    <div class="flex flex-col space-y-3">
-                        <button @click="localStorage.setItem('github_pat', githubPat); accountModal = false" class="w-full py-3 bg-slate-900 text-white font-medium rounded-xl hover:bg-slate-800 transition-colors">Save Changes</button>
-                        <button @click="accountModal = false" class="w-full py-3 bg-white text-slate-500 font-medium rounded-xl hover:bg-slate-50 transition-colors">Cancel</button>
-                    </div>
+            <div class="relative bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden p-6 space-y-6">
+                <div class="space-y-2">
+                    <h3 class="text-xl font-semibold text-slate-900">GitHub Settings</h3>
+                    <p class="text-sm text-slate-500">Provide your Personal Access Token to enable repository access.</p>
+                </div>
+                <div class="space-y-2">
+                    <label class="block text-xs font-bold uppercase tracking-wider text-slate-400 ml-1">Personal Access Token</label>
+                    <input type="password" x-model="githubPat" placeholder="ghp_xxxxxxxxxxxx" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all">
+                </div>
+                <div class="flex flex-col space-y-3">
+                    <button @click="localStorage.setItem('github_pat', githubPat); accountModal = false" class="w-full py-3 bg-slate-900 text-white font-medium rounded-xl hover:bg-slate-800 transition-colors">Save Changes</button>
+                    <button @click="accountModal = false" class="w-full py-3 bg-white text-slate-500 font-medium rounded-xl hover:bg-slate-50 transition-colors">Cancel</button>
                 </div>
             </div>
         </div>
-
     </div>
-
-    <script>
-        lucide.createIcons();
-    </script>
+    <script>lucide.createIcons();</script>
 </body>
 </html>
