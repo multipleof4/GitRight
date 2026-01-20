@@ -43,6 +43,7 @@
             this.$watch('fileTree', () => this.refreshIcons());
             this.$watch('contextMenu.show', (val) => val && this.refreshIcons());
             this.$watch('commitModal', (val) => val && this.refreshIcons());
+            this.$watch('clipboard', () => this.refreshIcons());
         },
 
         refreshIcons() {
@@ -144,14 +145,15 @@
             const newName = prompt('Rename to:', oldName);
             if (newName && newName !== oldName) {
                 const newPath = oldPath.substring(0, oldPath.lastIndexOf(oldName)) + newName;
-                const originalItem = this.fileTree.find(i => i.path === oldPath);
                 
-                this.trackChange('rename', newPath, oldPath, originalItem.sha, originalItem.type);
+                const itemsToMove = this.fileTree.filter(i => i.path === oldPath || i.path.startsWith(oldPath + '/'));
                 
                 this.fileTree = this.fileTree.map(item => {
-                    if (item.path === oldPath) return { ...item, path: newPath };
-                    if (item.path.startsWith(oldPath + '/')) {
-                        return { ...item, path: item.path.replace(oldPath + '/', newPath + '/') };
+                    const match = itemsToMove.find(m => m.path === item.path);
+                    if (match) {
+                        const updatedPath = item.path.replace(oldPath, newPath);
+                        this.trackChange('rename', updatedPath, item.path, item.sha, item.type);
+                        return { ...item, path: updatedPath };
                     }
                     return item;
                 });
@@ -162,9 +164,14 @@
         deleteItem() {
             if (confirm('Are you sure, Meowster?')) {
                 const target = this.contextMenu.target;
-                this.trackChange('delete', target.path, null, target.sha, target.type);
+                const itemsToDelete = this.fileTree.filter(i => i.path === target.path || i.path.startsWith(target.path + '/'));
+                
+                itemsToDelete.forEach(item => {
+                    this.trackChange('delete', item.path, null, item.sha, item.type);
+                });
+
                 this.fileTree = this.fileTree.filter(item => 
-                    item.path !== target.path && !item.path.startsWith(target.path + '/')
+                    !itemsToDelete.some(d => d.path === item.path)
                 );
             }
             this.contextMenu.show = false;
@@ -180,25 +187,33 @@
 
         pasteItem() {
             if (!this.clipboard.item) return;
-            const name = this.clipboard.item.path.split('/').pop();
-            const newPath = this.currentPath ? `${this.currentPath}/${name}` : name;
+            const oldPrefix = this.clipboard.item.path;
+            const name = oldPrefix.split('/').pop();
+            const newPrefix = this.currentPath ? `${this.currentPath}/${name}` : name;
             
-            if (this.fileTree.some(i => i.path === newPath)) return alert('Collision detected.');
+            if (this.fileTree.some(i => i.path === newPrefix)) return alert('Collision detected, Meowster.');
+            if (this.clipboard.action === 'copy' && newPrefix.startsWith(oldPrefix + '/')) return alert('Cannot copy a folder into itself, Meowster.');
+
+            const itemsToProcess = this.fileTree.filter(i => i.path === oldPrefix || i.path.startsWith(oldPrefix + '/'));
 
             if (this.clipboard.action === 'cut') {
-                const oldPath = this.clipboard.item.path;
-                this.trackChange('move', newPath, oldPath, this.clipboard.item.sha, this.clipboard.item.type);
                 this.fileTree = this.fileTree.map(item => {
-                    if (item.path === oldPath) return { ...item, path: newPath };
-                    if (item.path.startsWith(oldPath + '/')) {
-                        return { ...item, path: item.path.replace(oldPath + '/', newPath + '/') };
+                    const match = itemsToProcess.find(p => p.path === item.path);
+                    if (match) {
+                        const itemNewPath = item.path.replace(oldPrefix, newPrefix);
+                        this.trackChange('move', itemNewPath, item.path, item.sha, item.type);
+                        return { ...item, path: itemNewPath };
                     }
                     return item;
                 });
                 this.clipboard = { item: null, action: null };
             } else {
-                this.fileTree.push({ ...this.clipboard.item, path: newPath });
-                this.trackChange('add', newPath, null, this.clipboard.item.sha, this.clipboard.item.type);
+                const newItems = itemsToProcess.map(item => {
+                    const itemNewPath = item.path.replace(oldPrefix, newPrefix);
+                    this.trackChange('add', itemNewPath, null, item.sha, item.type);
+                    return { ...item, path: itemNewPath, sha: item.sha };
+                });
+                this.fileTree.push(...newItems);
             }
             this.contextMenu.show = false;
         },
@@ -364,7 +379,10 @@
                                 @touchend.stop="handlePressEnd()"
                                 @mousedown.stop="handlePressStart($event, item, 'item')"
                                 @mouseup.stop="handlePressEnd()"
-                                class="flex flex-col items-center p-2 rounded-xl hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200 transition-all group"
+                                :class="{
+                                    'opacity-40 grayscale pointer-events-none': clipboard.item && clipboard.action === 'cut' && (item.path === clipboard.item.path || item.path.startsWith(clipboard.item.path + '/')),
+                                    'flex flex-col items-center p-2 rounded-xl hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200 transition-all group': true
+                                }"
                             >
                                 <div class="mb-2">
                                     <template x-if="item.type === 'tree'">
