@@ -9,20 +9,13 @@
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
         [x-cloak] { display: none !important; }
-        /* Custom scrollbar for a cleaner look, Meowster */
-        .custom-scrollbar::-webkit-scrollbar {
-            width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: #e2e8f0;
-            border-radius: 10px;
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; height: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+        .truncate-2-lines { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
     </style>
 </head>
-<body class="bg-white antialiased text-slate-900">
+<body class="bg-white antialiased text-slate-900 overflow-hidden">
 
     <div x-data="{ 
         leftSidebar: false, 
@@ -31,6 +24,73 @@
         githubPat: localStorage.getItem('github_pat') || '',
         repos: JSON.parse(localStorage.getItem('github_repos') || '[]'),
         
+        currentRepo: null,
+        fileTree: [],
+        currentPath: '',
+        isLoading: false,
+
+        async selectRepo(repoStr) {
+            this.currentRepo = repoStr;
+            this.currentPath = '';
+            this.isLoading = true;
+            this.rightSidebar = false;
+            
+            const [fullRepo, branchPart] = repoStr.split('@');
+            const branch = branchPart || 'main';
+            const url = `https://api.github.com/repos/${fullRepo}/git/trees/${branch}?recursive=1`;
+            
+            try {
+                const headers = { 'Accept': 'application/vnd.github.v3+json' };
+                if (this.githubPat) headers['Authorization'] = `token ${this.githubPat}`;
+                
+                const response = await fetch(url, { headers });
+                if (!response.ok) throw new Error('Failed to fetch');
+                const data = await response.json();
+                this.fileTree = data.tree || [];
+            } catch (e) {
+                alert('Error fetching repository, Meowster. Check your PAT or repo name.');
+                this.currentRepo = null;
+            } finally {
+                this.isLoading = false;
+                this.$nextTick(() => lucide.createIcons());
+            }
+        },
+
+        get currentItems() {
+            if (!this.fileTree.length) return [];
+            return this.fileTree.filter(item => {
+                const parts = item.path.split('/');
+                if (this.currentPath === '') {
+                    return parts.length === 1;
+                }
+                const parentPath = parts.slice(0, -1).join('/');
+                return parentPath === this.currentPath;
+            }).sort((a, b) => (b.type === 'tree') - (a.type === 'tree') || a.path.localeCompare(b.path));
+        },
+
+        get breadcrumbs() {
+            if (!this.currentPath) return [];
+            return this.currentPath.split('/');
+        },
+
+        navigateTo(path) {
+            const item = this.fileTree.find(i => i.path === path);
+            if (item && item.type === 'tree') {
+                this.currentPath = path;
+            } else if (item && item.type === 'blob') {
+                alert('Opening file: ' + path + ', Master.');
+            }
+            this.$nextTick(() => lucide.createIcons());
+        },
+
+        goUp() {
+            if (!this.currentPath) return;
+            const parts = this.currentPath.split('/');
+            parts.pop();
+            this.currentPath = parts.join('/');
+            this.$nextTick(() => lucide.createIcons());
+        },
+
         addRepo() {
             const repo = prompt('Enter repository (owner/repo@branch):', 'multipleof4/GitRight@master');
             if (repo && repo.includes('/')) {
@@ -38,7 +98,7 @@
                 this.saveRepos();
                 this.$nextTick(() => lucide.createIcons());
             } else if (repo) {
-                alert('Invalid format, Meowster. Please use owner/repo@branch');
+                alert('Invalid format, Meowster.');
             }
         },
         
@@ -50,109 +110,175 @@
         saveRepos() {
             localStorage.setItem('github_repos', JSON.stringify(this.repos));
         }
-    }" class="min-h-screen flex flex-col">
+    }" class="h-screen flex flex-col overflow-hidden">
         
         <!-- Header -->
-        <header class="flex items-center justify-between px-4 py-3 border-b border-gray-100 sticky top-0 bg-white z-50">
-            <!-- Left Action -->
-            <button 
-                @click="leftSidebar = !leftSidebar"
-                class="p-2 hover:bg-gray-50 rounded-lg transition-colors text-slate-600 border border-gray-200"
-                aria-label="Toggle Left Sidebar"
-            >
-                <i data-lucide="panel-left" class="w-5 h-5"></i>
-            </button>
-
-            <!-- Center Logo/Icon -->
-            <div class="flex items-center justify-center">
-                <div class="bg-slate-100 p-2 rounded-full">
-                    <i data-lucide="sun" class="w-5 h-5 text-slate-600"></i>
-                </div>
+        <header class="flex items-center justify-between px-4 py-2 border-b border-gray-100 bg-white z-50 shrink-0">
+            <div class="flex items-center space-x-2">
+                <button @click="leftSidebar = !leftSidebar" class="p-1.5 hover:bg-gray-50 rounded-md border border-gray-200 text-slate-600">
+                    <i data-lucide="panel-left" class="w-4 h-4"></i>
+                </button>
+                <div class="h-4 w-[1px] bg-gray-200 mx-1"></div>
+                <template x-if="currentRepo">
+                    <div class="flex items-center text-xs font-medium text-slate-500 truncate max-w-[150px]">
+                        <i data-lucide="github" class="w-3 h-3 mr-1.5"></i>
+                        <span x-text="currentRepo.split('@')[0]"></span>
+                    </div>
+                </template>
             </div>
 
-            <!-- Right Action -->
-            <button 
-                @click="rightSidebar = !rightSidebar"
-                class="p-2 hover:bg-gray-50 rounded-lg transition-colors text-slate-600 border border-gray-200"
-                aria-label="Toggle Right Sidebar"
-            >
-                <i data-lucide="panel-right" class="w-5 h-5"></i>
+            <div class="bg-slate-100 p-1.5 rounded-full">
+                <i data-lucide="sun" class="w-4 h-4 text-slate-600"></i>
+            </div>
+
+            <button @click="rightSidebar = !rightSidebar" class="p-1.5 hover:bg-gray-50 rounded-md border border-gray-200 text-slate-600">
+                <i data-lucide="panel-right" class="w-4 h-4"></i>
             </button>
         </header>
 
         <!-- Main Content Area -->
-        <main class="flex-1 flex flex-col items-center justify-center p-6">
-            <div class="text-center space-y-4">
-                <h1 class="text-xl font-medium text-slate-400">Empty State</h1>
-                <p class="text-sm text-slate-300">Ready for your commands, Master.</p>
-            </div>
-        </main>
-
-        <!-- Mobile Sidebars -->
-        <div x-show="leftSidebar" x-cloak class="fixed inset-0 z-[60] flex">
-            <div @click="leftSidebar = false" class="fixed inset-0 bg-black/20 backdrop-blur-sm"></div>
-            <div class="relative w-64 bg-white h-full shadow-xl p-4 flex flex-col">
-                <div class="flex-1">
-                    <h2 class="font-bold mb-4">Left Menu</h2>
-                </div>
-                <button @click="leftSidebar = false" class="text-sm text-blue-600 text-left">Close</button>
-            </div>
-        </div>
-
-        <div x-show="rightSidebar" x-cloak class="fixed inset-0 z-[60] flex justify-end">
-            <div @click="rightSidebar = false" class="fixed inset-0 bg-black/20 backdrop-blur-sm"></div>
-            <div class="relative w-72 bg-white h-full shadow-xl p-4 flex flex-col">
-                
-                <!-- New Repo Button -->
-                <button 
-                    @click="addRepo()"
-                    class="flex items-center justify-center space-x-2 w-full p-3 mb-6 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl transition-all shadow-lg shadow-blue-100"
-                >
-                    <i data-lucide="plus-circle" class="w-5 h-5"></i>
-                    <span class="font-semibold">New Repo</span>
-                </button>
-
-                <!-- Repositories List (Scrollable) -->
-                <div class="flex-1 flex flex-col min-h-0">
-                    <h2 class="font-bold mb-4 text-slate-800 flex items-center">
-                        <i data-lucide="github" class="w-4 h-4 mr-2"></i>
-                        Repositories
-                    </h2>
-                    
-                    <div class="flex-1 overflow-y-auto pr-2 space-y-2 custom-scrollbar">
-                        <template x-for="(repo, index) in repos" :key="index">
-                            <div class="group flex items-center justify-between p-3 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors">
-                                <div class="flex items-center space-x-3 truncate">
-                                    <i data-lucide="git-fork" class="w-4 h-4 text-slate-400"></i>
-                                    <span class="text-sm font-medium text-slate-600 truncate" x-text="repo"></span>
-                                </div>
-                                <button @click="removeRepo(index)" class="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-500 transition-all">
-                                    <i data-lucide="trash-2" class="w-4 h-4"></i>
+        <main class="flex-1 flex flex-col min-h-0 bg-slate-50/50">
+            <!-- Explorer Toolbar -->
+            <template x-if="currentRepo">
+                <div class="flex items-center px-4 py-2 bg-white border-b border-gray-100 space-x-2 shrink-0">
+                    <button @click="goUp()" :disabled="!currentPath" class="p-1 hover:bg-gray-100 rounded disabled:opacity-30">
+                        <i data-lucide="arrow-up" class="w-4 h-4 text-slate-600"></i>
+                    </button>
+                    <div class="flex-1 flex items-center bg-slate-50 border border-slate-200 rounded px-2 py-1 overflow-x-auto custom-scrollbar">
+                        <button @click="currentPath = ''" class="text-xs text-blue-600 hover:underline whitespace-nowrap">root</button>
+                        <template x-for="(part, index) in breadcrumbs" :key="index">
+                            <div class="flex items-center">
+                                <i data-lucide="chevron-right" class="w-3 h-3 mx-1 text-slate-400"></i>
+                                <button 
+                                    @click="navigateTo(breadcrumbs.slice(0, index + 1).join('/'))" 
+                                    class="text-xs text-blue-600 hover:underline whitespace-nowrap" 
+                                    x-text="part">
                                 </button>
                             </div>
                         </template>
+                    </div>
+                </div>
+            </template>
 
-                        <template x-if="repos.length === 0">
-                            <div class="text-center py-8">
-                                <p class="text-xs text-slate-400 italic">No repositories added yet, Meowster.</p>
+            <!-- File Grid -->
+            <div class="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                <template x-if="!currentRepo">
+                    <div class="h-full flex flex-col items-center justify-center text-center space-y-4">
+                        <div class="bg-white p-6 rounded-3xl shadow-sm border border-slate-100">
+                            <i data-lucide="folder-open" class="w-12 h-12 text-slate-200 mx-auto mb-4"></i>
+                            <h1 class="text-lg font-medium text-slate-400">No Repository Selected</h1>
+                            <p class="text-xs text-slate-300">Select a repo from the right sidebar, Meowster.</p>
+                        </div>
+                    </div>
+                </template>
+
+                <template x-if="currentRepo && isLoading">
+                    <div class="h-full flex items-center justify-center">
+                        <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                    </div>
+                </template>
+
+                <template x-if="currentRepo && !isLoading">
+                    <div class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
+                        <template x-for="item in currentItems" :key="item.path">
+                            <button 
+                                @click="navigateTo(item.path)"
+                                class="flex flex-col items-center p-2 rounded-xl hover:bg-white hover:shadow-sm border border-transparent hover:border-slate-200 transition-all group"
+                            >
+                                <div class="mb-2">
+                                    <template x-if="item.type === 'tree'">
+                                        <i data-lucide="folder" class="w-10 h-10 text-blue-400 fill-blue-50"></i>
+                                    </template>
+                                    <template x-if="item.type === 'blob'">
+                                        <i data-lucide="file-text" class="w-10 h-10 text-slate-400"></i>
+                                    </template>
+                                </div>
+                                <span class="text-[10px] font-medium text-slate-600 text-center break-all truncate-2-lines leading-tight" x-text="item.path.split('/').pop()"></span>
+                            </button>
+                        </template>
+                    </div>
+                </template>
+            </div>
+        </main>
+
+        <!-- Left Sidebar (Tree View) -->
+        <div x-show="leftSidebar" x-cloak class="fixed inset-0 z-[60] flex">
+            <div @click="leftSidebar = false" class="fixed inset-0 bg-black/20 backdrop-blur-sm"></div>
+            <div class="relative w-72 bg-white h-full shadow-xl flex flex-col border-r border-slate-100">
+                <div class="p-4 border-b border-slate-50 flex items-center justify-between">
+                    <h2 class="text-sm font-bold text-slate-800">Explorer</h2>
+                    <button @click="leftSidebar = false" class="p-1 hover:bg-slate-50 rounded">
+                        <i data-lucide="x" class="w-4 h-4 text-slate-400"></i>
+                    </button>
+                </div>
+                <div class="flex-1 overflow-y-auto p-2 custom-scrollbar">
+                    <template x-if="!currentRepo">
+                        <p class="text-[10px] text-slate-400 italic p-4">Select a repository to view its tree structure.</p>
+                    </template>
+                    <template x-if="currentRepo">
+                        <div class="space-y-0.5">
+                            <template x-for="item in fileTree" :key="item.path">
+                                <button 
+                                    @click="navigateTo(item.path); if(item.type==='blob') leftSidebar=false"
+                                    class="w-full flex items-center px-2 py-1 rounded hover:bg-slate-50 text-left group"
+                                    :class="currentPath === item.path ? 'bg-blue-50 text-blue-700' : 'text-slate-600'"
+                                >
+                                    <div :style="`margin-left: ${(item.path.split('/').length - 1) * 12}px`" class="flex items-center">
+                                        <template x-if="item.type === 'tree'">
+                                            <i data-lucide="chevron-right" class="w-3 h-3 mr-1 text-slate-300" :class="currentPath.startsWith(item.path) ? 'rotate-90' : ''"></i>
+                                        </template>
+                                        <template x-if="item.type === 'blob'">
+                                            <span class="w-3 h-3 mr-1"></span>
+                                        </template>
+                                        <i :data-lucide="item.type === 'tree' ? 'folder' : 'file'" class="w-3.5 h-3.5 mr-2 opacity-70"></i>
+                                        <span class="text-[11px] truncate" x-text="item.path.split('/').pop()"></span>
+                                    </div>
+                                </button>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Sidebar (Repo List) -->
+        <div x-show="rightSidebar" x-cloak class="fixed inset-0 z-[60] flex justify-end">
+            <div @click="rightSidebar = false" class="fixed inset-0 bg-black/20 backdrop-blur-sm"></div>
+            <div class="relative w-72 bg-white h-full shadow-xl p-4 flex flex-col">
+                <button @click="addRepo()" class="flex items-center justify-center space-x-2 w-full p-2.5 mb-6 bg-blue-600 hover:bg-blue-700 text-white rounded-xl transition-all shadow-lg shadow-blue-100">
+                    <i data-lucide="plus-circle" class="w-4 h-4"></i>
+                    <span class="text-sm font-semibold">New Repo</span>
+                </button>
+
+                <div class="flex-1 flex flex-col min-h-0">
+                    <h2 class="text-xs font-bold mb-4 text-slate-400 uppercase tracking-widest flex items-center">
+                        <i data-lucide="github" class="w-3 h-3 mr-2"></i>
+                        Repositories
+                    </h2>
+                    <div class="flex-1 overflow-y-auto pr-2 space-y-2 custom-scrollbar">
+                        <template x-for="(repo, index) in repos" :key="index">
+                            <div class="group flex items-center justify-between p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl border border-slate-100 transition-colors cursor-pointer" @click="selectRepo(repo)">
+                                <div class="flex items-center space-x-3 truncate">
+                                    <i data-lucide="git-fork" class="w-3.5 h-3.5 text-slate-400"></i>
+                                    <span class="text-xs font-medium text-slate-600 truncate" x-text="repo"></span>
+                                </div>
+                                <button @click.stop="removeRepo(index)" class="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-red-500 transition-all">
+                                    <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+                                </button>
                             </div>
                         </template>
                     </div>
                 </div>
                 
-                <!-- Account Button -->
                 <div class="pt-4 mt-4 border-t border-slate-100">
-                    <button 
-                        @click="accountModal = true; rightSidebar = false"
-                        class="flex items-center justify-between w-full p-3 bg-slate-50 hover:bg-slate-100 rounded-2xl transition-colors group"
-                    >
+                    <button @click="accountModal = true; rightSidebar = false" class="flex items-center justify-between w-full p-2.5 bg-slate-50 hover:bg-slate-100 rounded-xl transition-colors group">
                         <div class="flex items-center space-x-3">
-                            <div class="bg-slate-900 rounded-full p-2">
-                                <i data-lucide="user" class="w-4 h-4 text-blue-400 fill-blue-400"></i>
+                            <div class="bg-slate-900 rounded-full p-1.5">
+                                <i data-lucide="user" class="w-3.5 h-3.5 text-blue-400 fill-blue-400"></i>
                             </div>
-                            <span class="font-medium text-slate-700">Account</span>
+                            <span class="text-xs font-medium text-slate-700">Account</span>
                         </div>
-                        <i data-lucide="chevron-down" class="w-4 h-4 text-slate-400 group-hover:text-slate-600"></i>
+                        <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-400 group-hover:text-slate-600"></i>
                     </button>
                 </div>
             </div>
@@ -167,33 +293,13 @@
                         <h3 class="text-xl font-semibold text-slate-900">GitHub Settings</h3>
                         <p class="text-sm text-slate-500">Provide your Personal Access Token to enable repository access.</p>
                     </div>
-
                     <div class="space-y-2">
-                        <label for="pat" class="block text-xs font-bold uppercase tracking-wider text-slate-400 ml-1">
-                            Personal Access Token
-                        </label>
-                        <input 
-                            id="pat"
-                            type="password" 
-                            x-model="githubPat"
-                            placeholder="ghp_xxxxxxxxxxxx"
-                            class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
-                        >
+                        <label for="pat" class="block text-xs font-bold uppercase tracking-wider text-slate-400 ml-1">Personal Access Token</label>
+                        <input id="pat" type="password" x-model="githubPat" placeholder="ghp_xxxxxxxxxxxx" class="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none transition-all">
                     </div>
-
                     <div class="flex flex-col space-y-3">
-                        <button 
-                            @click="localStorage.setItem('github_pat', githubPat); accountModal = false"
-                            class="w-full py-3 bg-slate-900 text-white font-medium rounded-xl hover:bg-slate-800 transition-colors"
-                        >
-                            Save Changes
-                        </button>
-                        <button 
-                            @click="accountModal = false"
-                            class="w-full py-3 bg-white text-slate-500 font-medium rounded-xl hover:bg-slate-50 transition-colors"
-                        >
-                            Cancel
-                        </button>
+                        <button @click="localStorage.setItem('github_pat', githubPat); accountModal = false" class="w-full py-3 bg-slate-900 text-white font-medium rounded-xl hover:bg-slate-800 transition-colors">Save Changes</button>
+                        <button @click="accountModal = false" class="w-full py-3 bg-white text-slate-500 font-medium rounded-xl hover:bg-slate-50 transition-colors">Cancel</button>
                     </div>
                 </div>
             </div>
@@ -202,10 +308,7 @@
     </div>
 
     <script>
-        // Initialize Lucide icons
         lucide.createIcons();
-
-        // Re-initialize icons if Alpine updates the DOM
         document.addEventListener('alpine:initialized', () => {
             lucide.createIcons();
         });
