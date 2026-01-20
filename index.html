@@ -243,22 +243,36 @@
                 const lastCommitData = await this.apiRequest(`/git/commits/${lastCommitSha}`);
                 const baseTreeSha = lastCommitData.tree.sha;
 
-                const treePayload = [];
+                // Deduplicate changes by path to prevent GitRPC::BadObjectState
+                const finalChanges = new Map();
                 this.pendingChanges.forEach(change => {
                     const mode = change.itemType === 'tree' ? '040000' : '100644';
                     
                     if (change.type === 'delete') {
-                        treePayload.push({ path: change.path, mode, type: change.itemType, sha: null });
+                        finalChanges.set(change.path, { path: change.path, mode, type: change.itemType, sha: null });
                     } else if (change.type === 'rename' || change.type === 'move') {
-                        treePayload.push({ path: change.oldPath, mode, type: change.itemType, sha: null });
-                        treePayload.push({ path: change.path, mode, type: change.itemType, sha: change.sha });
+                        finalChanges.set(change.oldPath, { path: change.oldPath, mode, type: change.itemType, sha: null });
+                        finalChanges.set(change.path, { path: change.path, mode, type: change.itemType, sha: change.sha });
                     } else if (change.type === 'add') {
-                        if (change.sha) {
-                            treePayload.push({ path: change.path, mode, type: change.itemType, sha: change.sha });
-                        } else {
-                            treePayload.push({ path: change.path, mode, type: change.itemType, content: '\n' });
-                        }
+                        const entry = { path: change.path, mode, type: change.itemType };
+                        if (change.sha) entry.sha = change.sha;
+                        else entry.content = '\n';
+                        finalChanges.set(change.path, entry);
                     }
+                });
+
+                // Optimization: If a parent folder is being deleted, don't explicitly delete children
+                const pathsToDelete = Array.from(finalChanges.values())
+                    .filter(c => c.sha === null)
+                    .map(c => c.path)
+                    .sort((a, b) => a.length - b.length);
+
+                const treePayload = Array.from(finalChanges.values()).filter(change => {
+                    if (change.sha === null) {
+                        const hasParentDeleted = pathsToDelete.some(p => change.path.startsWith(p + '/') && change.path !== p);
+                        return !hasParentDeleted;
+                    }
+                    return true;
                 });
 
                 const newTree = await this.apiRequest('/git/trees', 'POST', {
